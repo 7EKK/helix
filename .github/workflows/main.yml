@@ -1,0 +1,86 @@
+name: Auto-Sync & Build Windows
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  schedule:
+    # Run daily at 02:00 UTC to keep fork in sync with upstream + build latest Windows version
+    - cron: '0 2 * * *'
+  workflow_dispatch:   # Manual trigger from Actions tab
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  sync-and-build-windows:
+    name: Sync Fork + Build Windows (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout sources (full history for merge)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # persist-credentials: true (default) allows pushing later
+
+      - name: Configure git user for merge/push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+        shell: bash
+
+      - name: Add upstream remote and fetch latest changes
+        run: |
+          git remote add upstream https://github.com/helix-editor/helix.git || true
+          git fetch upstream
+        shell: bash
+
+      - name: Merge upstream/master into current branch (auto-sync)
+        run: |
+          git merge upstream/master --no-edit --strategy-option=theirs || echo "Merge completed (or no changes)"
+        shell: bash
+
+      - name: Push synced changes back to fork (if any)
+        run: |
+          git push origin master || echo "Nothing to push or push skipped"
+        shell: bash
+
+      - name: Remove rust-toolchain.toml (to use specified toolchain)
+        run: rm rust-toolchain.toml
+        shell: bash
+
+      - name: Install Rust toolchain (1.90.0 + Windows target)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.90.0
+          target: x86_64-pc-windows-msvc
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "windows-build"
+
+      - name: Fetch tree-sitter grammars
+        run: cargo run --package=helix-loader --bin=hx-loader
+
+      - name: Build release binary (--profile opt)
+        run: cargo build --profile opt --locked --target x86_64-pc-windows-msvc
+
+      - name: Prepare artifact (hx.exe + runtime)
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/x86_64-pc-windows-msvc/opt/hx.exe" dist/
+          # Remove grammar sources (if present) to keep artifact smaller
+          if [ -d runtime/grammars/sources ]; then
+            rm -rf runtime/grammars/sources
+          fi
+          cp -r runtime dist/
+
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: helix-windows-x86_64
+          path: dist
+          retention-days: 14
